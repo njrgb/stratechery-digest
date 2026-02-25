@@ -3,6 +3,7 @@ import io
 import os
 import re
 import json
+import time
 import base64
 import markdown as md
 from datetime import datetime, timezone
@@ -34,11 +35,12 @@ Assume full familiarity with the tech industry. No filler phrases like "the auth
 Be direct, specific, and opinionated.
 Use plain prose for narrative and analysis. Use bullet points when listing discrete items (advantages, risks, steps, frameworks).
 
+CRITICAL RULE: Always use specific names. Never write vague references like "the guest" or "some argue". Use the actual person, company, or framework name.
+
+CRITICAL RULE: Always anchor claims with specific metrics, timeframes, and indicators mentioned in the article. Never write vague descriptors like "strong growth" or "many users" when the article provides concrete data. Use the actual figures — e.g. "grew DAUs 3x in 18 months" not "rapid growth", "used by 40% of Fortune 500 companies" not "widely adopted".
+
 Start with a single sentence introducing the guest: their name, current role, and company.
 If there is no guest (Lenny wrote it himself), skip the intro line.
-
-CRITICAL RULE: Always use specific names. Never write vague references like "the guest" or "some argue".
-Use the actual person, company, or framework name.
 
 If the article includes a "Key Takeaways" section, integrate those points into the relevant topic sections — do not repeat them as a standalone list.
 
@@ -54,19 +56,28 @@ TOPICS COVERED
 [For each topic, one section with the topic name in caps as the header:]
 
 [TOPIC NAME IN CAPS]
-[2-3 paragraphs of direct analysis]"""
+[2-3 paragraphs of direct analysis]
 
-COMMUNITY_PROMPT = """This is a Lenny's Newsletter Community Wisdom email. Extract and format the following:
+FRAMEWORKS OR MODELS
+[Only include if the guest presents a named framework or model — e.g. "the CIRCLES method", "the four traps of growth". State the name, then list its components as bullet points. If no named framework is presented, omit this section entirely.]
+
+IMPLICATIONS
+[2-3 bullet points: what product managers, founders, or growth leaders should take away. Be specific and actionable.]"""
+
+COMMUNITY_PROMPT = """This is a Lenny's Newsletter Community Wisdom email. The text may contain markdown links in [text](url) format — preserve these links in your output.
+
+Extract and format the following:
 
 1. A markdown table with these exact columns:
-   | Question | Best Response | # Other Responses |
+   | Question | Best Response | Thread Link | # Other Responses |
 
    - "Question" is the question posted by the community member
    - "Best Response" is the top/highlighted answer shown
+   - "Thread Link": if a URL is present in the email for this question's thread, format it as [View thread](url). Otherwise use "—"
    - "# Other Responses" is the count of other replies shown in the email. If not shown, use "—"
    - Include all questions present in the email
 
-2. After the table, a TOP FINDS section — copy the content from the "Top Finds" section of the email verbatim, formatted as a bulleted list. If there is no Top Finds section, omit this section entirely.
+2. After the table, a TOP FINDS section — copy the content from the "Top Finds" section of the email verbatim, formatted as a bulleted list. Preserve any [text](url) markdown links. If there is no Top Finds section, omit this section entirely.
 
 Return only these two sections, no other commentary.
 
@@ -106,6 +117,78 @@ def strip_html(html):
     parser = HTMLStripper()
     parser.feed(html)
     return parser.get_text()
+
+
+def strip_html_with_links(html):
+    """Strip HTML but convert <a href> tags to markdown [text](url) format."""
+    class LinkPreservingStripper(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.chunks = []
+            self._skip_tags = {'script', 'style', 'head'}
+            self._skip = False
+            self._in_link = False
+            self._link_href = ''
+            self._link_text = []
+
+        def handle_starttag(self, tag, attrs):
+            if tag in self._skip_tags:
+                self._skip = True
+            if tag in ('p', 'br', 'li', 'h1', 'h2', 'h3', 'h4', 'blockquote'):
+                self.chunks.append('\n')
+            if tag == 'a' and not self._skip:
+                attrs_dict = dict(attrs)
+                href = attrs_dict.get('href', '')
+                if href and not href.startswith('mailto:') and not href.startswith('#'):
+                    self._in_link = True
+                    self._link_href = href
+                    self._link_text = []
+
+        def handle_endtag(self, tag):
+            if tag in self._skip_tags:
+                self._skip = False
+            if tag == 'a' and self._in_link:
+                text = ''.join(self._link_text).strip()
+                if text and self._link_href:
+                    self.chunks.append(f'[{text}]({self._link_href})')
+                elif text:
+                    self.chunks.append(text)
+                self._in_link = False
+                self._link_href = ''
+                self._link_text = []
+
+        def handle_data(self, data):
+            if not self._skip:
+                if self._in_link:
+                    self._link_text.append(data)
+                else:
+                    self.chunks.append(data)
+
+        def get_text(self):
+            text = ''.join(self.chunks)
+            text = re.sub(r'\n{3,}', '\n\n', text)
+            text = re.sub(r'[ \t]+', ' ', text)
+            return text.strip()
+
+    parser = LinkPreservingStripper()
+    parser.feed(html)
+    return parser.get_text()
+
+
+def _call_with_retry(fn, max_attempts=3):
+    """Call fn(), retrying on transient errors with exponential backoff."""
+    from openai import AuthenticationError, PermissionDeniedError
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except (AuthenticationError, PermissionDeniedError):
+            raise  # never retry auth errors — they won't resolve
+        except Exception as e:
+            if attempt == max_attempts - 1:
+                raise
+            wait = 10 * (2 ** attempt)  # 10s, 20s
+            print(f"  API call failed (attempt {attempt + 1}/{max_attempts}): {e}. Retrying in {wait}s...")
+            time.sleep(wait)
 
 
 def get_gmail_service():
@@ -194,7 +277,13 @@ def fetch_lenny_emails(service):
             continue
 
         raw_body = decode_email_body(msg['payload'])
-        text = strip_html(raw_body) if '<' in raw_body else raw_body
+        is_html = '<' in raw_body
+
+        if email_type == 'community':
+            # Preserve links as markdown for community emails so GPT can include them in the table
+            text = strip_html_with_links(raw_body) if is_html else raw_body
+        else:
+            text = strip_html(raw_body) if is_html else raw_body
 
         emails.append({
             'from': from_addr,
@@ -208,26 +297,26 @@ def fetch_lenny_emails(service):
 
 
 def summarize_article(title, text, client):
-    response = client.chat.completions.create(
+    response = _call_with_retry(lambda: client.chat.completions.create(
         model='gpt-4o',
-        max_tokens=2048,
+        max_tokens=4000,
         messages=[{
             'role': 'user',
             'content': ARTICLE_PROMPT.format(title=title, text=text)
         }]
-    )
+    ))
     return response.choices[0].message.content
 
 
 def summarize_community(text, client):
-    response = client.chat.completions.create(
+    response = _call_with_retry(lambda: client.chat.completions.create(
         model='gpt-4o',
-        max_tokens=2048,
+        max_tokens=4000,
         messages=[{
             'role': 'user',
             'content': COMMUNITY_PROMPT.format(text=text)
         }]
-    )
+    ))
     return response.choices[0].message.content
 
 

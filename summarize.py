@@ -3,7 +3,9 @@ import io
 import os
 import re
 import json
+import time
 import base64
+import argparse
 import feedparser
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -26,21 +28,43 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='repla
 
 STRATECHERY_FEED = os.environ.get('STRATECHERY_FEED', '')
 
+
+def _call_with_retry(fn, max_attempts=3):
+    """Call fn(), retrying on transient errors with exponential backoff."""
+    from openai import AuthenticationError, PermissionDeniedError
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except (AuthenticationError, PermissionDeniedError):
+            raise  # never retry auth errors — they won't resolve
+        except Exception as e:
+            if attempt == max_attempts - 1:
+                raise
+            wait = 10 * (2 ** attempt)  # 10s, 20s
+            print(f"  API call failed (attempt {attempt + 1}/{max_attempts}): {e}. Retrying in {wait}s...")
+            time.sleep(wait)
+
+
 # Note: {{ and }} are escaped braces in format strings
 EXTRACT_PROMPT = """List all publicly traded companies mentioned in this article.
-Return valid JSON only, no other text: {{"companies": [{{"name": "Full Company Name", "ticker": "TICK"}}]}}
+Return valid JSON only, no other text: {{"companies": [{{"name": "Full Company Name", "ticker": "TICK", "segments": ["Division1", "Division2"]}}]}}
+- "segments": list the specific business divisions, products, or units of this company that are discussed in the article (e.g. ["Xbox", "Gaming"] for MSFT if those divisions are central to the piece). Empty list if no specific division is discussed.
 Only include companies with known stock exchange tickers. Skip private companies and uncertain cases.
 
 Article title: {title}
 Article (first 2000 chars): {text}"""
 
 SUMMARIZE_PROMPT = """You are summarizing a Stratechery article for a senior tech/product professional.
-Assume full familiarity with the tech industry. No filler phrases like "the author argues" or "this piece explores".
+Assume full familiarity with the tech industry. No generic filler like "this piece explores" or "the article discusses".
 Be direct, specific, and opinionated.
+
+CRITICAL RULE: Make Ben Thompson's thesis and reasoning chain explicit throughout. Don't just describe what happened — show WHY Thompson interprets it the way he does and what conclusion he draws. Use "Thompson argues...", "Thompson's view is...", "Thompson concludes..." to attribute his specific analytical claims. The reader should finish each section understanding not just the facts but Thompson's actual position and the logic behind it.
 Use plain prose for narrative and analysis. Use bullet points when listing discrete items (advantages, risks, players, features) — wherever a list is genuinely cleaner than a sentence.
 
 CRITICAL RULE: Always use specific names. Never write "the opposing view", "the article", "critics", or "some argue".
 Instead, name the actual person, publication, or company — e.g. "Citrini Research argues...", "The Wall Street Journal reported...", "Andreessen claims...".
+
+CRITICAL RULE: Always anchor claims with specific metrics, timeframes, and indicators mentioned in the article. Never write vague descriptors like "declining performance" or "faced challenges" when the article provides concrete data. Use the actual figures — e.g. "three consecutive years of declining Xbox hardware revenue" not "hardware struggles", "down 40% year-over-year" not "significant drop".
 If a name isn't clear from the text, use the closest specific descriptor available (e.g. "the Citrini Research note" not "the piece").
 
 Article title: {title}
@@ -48,6 +72,10 @@ Article text:
 {text}
 
 {financial_block}
+
+Article type: {article_type}
+If this is a Daily Update: write compact sections (1-2 focused paragraphs per topic). You may omit MARKET CONTEXT if market structure isn't central to the piece.
+If this is a Weekly: write full-length sections. Include MARKET CONTEXT with concrete size/share data.
 
 The article title may indicate multiple topics (comma-separated) or a single deep-dive. Detect this from the title and structure accordingly.
 
@@ -75,13 +103,17 @@ Core debate: [The central claim being contested, in one sentence]
 
 Conclusion: [Stratechery's overall verdict or sentiment in 2-3 sentences]
 
+IMPLICATIONS
+[2-3 bullet points: what this means for builders, investors, or operators in the relevant space. Be specific and actionable — e.g. "If you're building developer tooling, Thompson's framing suggests commoditization pressure from below is more near-term than API lock-in".]
+
 MARKET CONTEXT
-[For each distinct market discussed: estimated size, key players with rough market share percentages, and market structure. Be specific with numbers. Flag if approximate.]
+[For each distinct market discussed: estimated size, key players with rough market share percentages, and market structure. Be specific with numbers. Flag if approximate. Omit for Daily Updates unless market structure is central to the article.]
 
 FINANCIALS
 [For each company, use the financial data provided. One entry per company:
 Name (TICKER) — Market cap: $X.XB | [Most recent quarter] revenue: $XM (+X% YoY) | Net income: $XM
-If no data was provided for a company, omit it entirely. Do not invent figures.]"""
+If relevant divisions are listed, add on a new line using this exact markdown link format: "Segment data: [View {{division names}} breakdown →](the provided URL)"
+If no financial data was provided for a company, omit it entirely. Do not invent figures.]"""
 
 
 class HTMLStripper(HTMLParser):
@@ -118,11 +150,13 @@ def strip_html(html):
     return parser.get_text()
 
 
-def fetch_latest():
+def fetch_latest(entry_index=0):
     feed = feedparser.parse(STRATECHERY_FEED)
     if not feed.entries:
         raise RuntimeError("No entries found in feed")
-    entry = feed.entries[0]
+    if entry_index >= len(feed.entries):
+        raise RuntimeError(f"Feed only has {len(feed.entries)} entries; index {entry_index} is out of range")
+    entry = feed.entries[entry_index]
     title = entry.get('title', 'Untitled')
     published = entry.get('published', '')
     link = entry.get('link', '')
@@ -133,15 +167,15 @@ def fetch_latest():
 
 def extract_companies(title, text, client):
     try:
-        response = client.chat.completions.create(
+        response = _call_with_retry(lambda: client.chat.completions.create(
             model="gpt-4o",
-            max_tokens=300,
+            max_tokens=400,
             response_format={"type": "json_object"},
             messages=[{
                 "role": "user",
                 "content": EXTRACT_PROMPT.format(title=title, text=text[:2000])
             }]
-        )
+        ))
         data = json.loads(response.choices[0].message.content)
         return data.get('companies', [])
     except Exception as e:
@@ -198,7 +232,8 @@ def fetch_financials(companies):
                 'ticker': co['ticker'],
                 'market_cap': market_cap,
                 'quarters': quarters,
-                'yoy_growth': yoy_growth
+                'yoy_growth': yoy_growth,
+                'segments': co.get('segments', []),
             })
         except Exception as e:
             print(f"  (Skipping {co.get('ticker', '?')}: {e})")
@@ -218,23 +253,29 @@ def format_financial_block(financials):
         if co['yoy_growth'] is not None:
             sign = "+" if co['yoy_growth'] >= 0 else ""
             entry += f"\n  YoY revenue growth (vs same quarter last year): {sign}{co['yoy_growth']:.1f}%"
+        if co.get('segments'):
+            segs = ', '.join(co['segments'])
+            ticker = co['ticker']
+            entry += f"\n  Relevant divisions: {segs}"
+            entry += f"\n  Segment-level data URL: https://finance.yahoo.com/quote/{ticker}/financials/"
         lines.append(entry)
     return '\n'.join(lines)
 
 
-def summarize(title, text, financial_block, client):
-    response = client.chat.completions.create(
+def summarize(title, text, financial_block, client, article_type='Weekly'):
+    response = _call_with_retry(lambda: client.chat.completions.create(
         model="gpt-4o",
-        max_tokens=2048,
+        max_tokens=4000,
         messages=[{
             "role": "user",
             "content": SUMMARIZE_PROMPT.format(
                 title=title,
                 text=text,
-                financial_block=financial_block
+                financial_block=financial_block,
+                article_type=article_type
             )
         }]
-    )
+    ))
     return response.choices[0].message.content
 
 
@@ -309,7 +350,7 @@ def _prepare_html_summary(summary):
     return text
 
 
-def send_email(title, published, link, summary):
+def send_email(title, published, link, summary, article_type='Weekly'):
     to_email = os.environ.get('TO_EMAIL')
     if not to_email:
         raise RuntimeError("TO_EMAIL environment variable not set")
@@ -329,14 +370,14 @@ def send_email(title, published, link, summary):
   .footer {{ margin-top: 2em; font-size: 0.85em; color: #888; border-top: 1px solid #eee; padding-top: 1em; }}
 </style></head>
 <body>
-<p class="meta">Stratechery &nbsp;·&nbsp; {published[:16]}</p>
+<p class="meta">Stratechery &nbsp;·&nbsp; {published[:16]} &nbsp;·&nbsp; {article_type}</p>
 <h1>{title}</h1>
 {html_body}
 <p class="footer"><a href="{link}">Read original →</a></p>
 </body></html>"""
 
     msg = MIMEMultipart('alternative')
-    msg['Subject'] = f"Stratechery: {title}"
+    msg['Subject'] = f"Stratechery [{article_type}]: {title}"
     msg['From'] = 'me'
     msg['To'] = to_email
     msg.attach(MIMEText(summary, 'plain', 'utf-8'))
@@ -358,22 +399,45 @@ def is_fresh(published_str, max_hours=25):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Summarize a Stratechery article')
+    parser.add_argument('--index', type=int, default=0,
+                        help='Feed entry index to summarize (0=latest, 1=second latest, etc.)')
+    parser.add_argument('--list', action='store_true',
+                        help='List available articles in the feed and exit')
+    args = parser.parse_args()
+
     api_key = os.environ.get('OPENAI_API_KEY')
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY environment variable not set")
     client = OpenAI(api_key=api_key)
 
-    print("Fetching latest Stratechery article...")
-    title, published, link, text = fetch_latest()
+    if args.list:
+        feed = feedparser.parse(STRATECHERY_FEED)
+        print(f"\n{'#':<4} {'Published':<18} Title")
+        print("-" * 80)
+        for i, e in enumerate(feed.entries[:10]):
+            pub = e.get('published', '')[:16]
+            print(f"{i:<4} {pub:<18} {e.get('title', 'Untitled')}")
+        sys.exit(0)
+
+    print("Fetching Stratechery article...")
+    title, published, link, text = fetch_latest(args.index)
     print(f"Found: {title} ({len(text)} chars)")
 
-    if not is_fresh(published):
+    if args.index == 0 and not is_fresh(published):
         print("Article is more than 25 hours old — already sent. Exiting.")
         sys.exit(0)
+
+    # Detect article type: Daily Updates are typically shorter and often titled as such
+    article_type = 'Daily Update' if ('daily' in title.lower() or len(text) < 6000) else 'Weekly'
+    print(f"Detected article type: {article_type}")
 
     print("Extracting public companies...")
     companies = extract_companies(title, text, client)
     print(f"Companies identified: {[c['ticker'] for c in companies] or 'none'}")
+    for co in companies:
+        if co.get('segments'):
+            print(f"  {co['ticker']} segments: {co['segments']}")
 
     financial_block = ""
     if companies:
@@ -382,8 +446,8 @@ if __name__ == "__main__":
         financial_block = format_financial_block(financials)
 
     print("Summarizing...")
-    summary = summarize(title, text, financial_block, client)
+    summary = summarize(title, text, financial_block, client, article_type)
     print_output(title, published, link, summary)
 
     print("Sending email...")
-    send_email(title, published, link, summary)
+    send_email(title, published, link, summary, article_type)
