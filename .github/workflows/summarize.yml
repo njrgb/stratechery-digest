@@ -1,4 +1,4 @@
-name: Daily Stratechery Summary
+name: Daily Newsletter Summaries
 
 on:
   schedule:
@@ -19,10 +19,17 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run summarizer
+      - name: Run Stratechery summarizer
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           STRATECHERY_FEED: ${{ secrets.STRATECHERY_FEED }}
           TO_EMAIL: ${{ secrets.TO_EMAIL }}
           GMAIL_TOKEN_JSON: ${{ secrets.GMAIL_TOKEN_JSON }}
         run: python summarize.py
+
+      - name: Run Lenny summarizer
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TO_EMAIL: ${{ secrets.TO_EMAIL }}
+          GMAIL_TOKEN_JSON: ${{ secrets.GMAIL_TOKEN_JSON }}
+        run: python lenny.py
