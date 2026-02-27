@@ -13,6 +13,7 @@ from email.mime.text import MIMEText
 from html.parser import HTMLParser
 from openai import OpenAI
 from google.auth.transport.requests import Request
+from src.agents.reviewer import ReviewInput, audit
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
@@ -240,13 +241,13 @@ def decode_email_body(payload):
     return html_body or plain_body or ''
 
 
-def is_fresh(date_str, max_hours=25):
+def is_fresh(date_str, max_hours=23):
     """Return True if email was received within the last max_hours."""
     try:
         age = datetime.now(timezone.utc) - parsedate_to_datetime(date_str)
         return age.total_seconds() < max_hours * 3600
     except Exception:
-        return True  # unparseable date — assume fresh
+        return False  # unparseable date — skip rather than risk duplicate
 
 
 def fetch_lenny_emails(service):
@@ -423,9 +424,48 @@ if __name__ == '__main__':
 
         if email_type == 'community':
             summary = summarize_community(email['text'], client)
-            out_subject = f"Lenny's Community Wisdom: {email['date'][:16]}"
+            out_subject = f"[TL;DR] Lenny's Community Wisdom: {email['date'][:16]}"
         else:
             summary = summarize_article(subject, email['text'], client)
-            out_subject = f"Lenny's: {subject}"
+            short_subject = subject.split(',')[0].strip()
+            out_subject = f"[TL;DR] Lenny's: {short_subject}"
+
+            # --- Audit loop (article emails only) ---
+            print(f"    Auditing...")
+            result = audit(ReviewInput(
+                raw_article=email['text'],
+                yfinance_data=[],
+                draft_summary=summary,
+                newsletter_type='lenny',
+            ), client)
+
+            if result.action == 'FAIL':
+                print(f"    Audit FAIL — revising. Violations:\n{result.critique[:300]}")
+                revision_prompt = (
+                    f"Revise this newsletter summary to fix all of the following violations "
+                    f"before it is emailed. Apply every correction listed:\n\n"
+                    f"{result.critique}\n\n"
+                    f"---\nOriginal summary to revise:\n{summary}"
+                )
+                revision_response = _call_with_retry(lambda: client.chat.completions.create(
+                    model='gpt-4o',
+                    max_tokens=4000,
+                    messages=[{'role': 'user', 'content': revision_prompt}]
+                ))
+                summary = revision_response.choices[0].message.content
+
+                result2 = audit(ReviewInput(
+                    raw_article=email['text'],
+                    yfinance_data=[],
+                    draft_summary=summary,
+                    newsletter_type='lenny',
+                ), client)
+                if result2.action == 'FAIL':
+                    print(f"    Audit still FAIL — flagging subject line.")
+                    out_subject = f"⚠ Audit failed: {out_subject}"
+                else:
+                    print(f"    Audit PASS after revision.")
+            else:
+                print(f"    Audit PASS.")
 
         send_summary_email(out_subject, email['date'], summary, service)
