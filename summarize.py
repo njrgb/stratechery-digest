@@ -390,12 +390,7 @@ def send_email(title, published, link, summary, article_type='Weekly', subject_p
     service.users().messages().send(userId='me', body={'raw': raw}).execute()
     print(f"Email sent to {to_email}")
 
-    """Return True if article was published within the last ``max_hours``.
 
-    The default of 23 hours is intentionally slightly less than a full day
-    to avoid reprocessing items across daily runs. Callers that depend on
-    a different freshness window should pass ``max_hours`` explicitly.
-    """
 def is_fresh(published_str, max_hours=23):
     """Return True if article was published within the last max_hours."""
     try:
@@ -432,7 +427,7 @@ if __name__ == "__main__":
     print(f"Found: {title} ({len(text)} chars)")
 
     if args.index == 0 and not is_fresh(published):
-        print("Article is more than 25 hours old — already sent. Exiting.")
+        print("Article is more than 23 hours old — already sent. Exiting.")
         sys.exit(0)
 
     # Detect article type: Daily Updates are typically shorter and often titled as such

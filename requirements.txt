@@ -5,3 +5,5 @@ markdown
 google-auth
 google-auth-oauthlib
 google-api-python-client
+pydantic>=2.0
+pytest

@@ -1,0 +1,30 @@
+[
+  {
+    "name": "Alphabet Inc.",
+    "ticker": "GOOGL",
+    "market_cap_usd": 2310000000000,
+    "price_usd": 186.50,
+    "revenue_ttm_usd": 350150000000,
+    "revenue_growth_yoy_pct": 11.2,
+    "gross_margin_pct": 58.4,
+    "operating_margin_pct": 32.1,
+    "pe_ratio": 24.8,
+    "52w_high_usd": 207.05,
+    "52w_low_usd": 130.67,
+    "segments": ["Google Search", "YouTube Ads", "Google Cloud", "Google Other", "Other Bets"]
+  },
+  {
+    "name": "Meta Platforms Inc.",
+    "ticker": "META",
+    "market_cap_usd": 1620000000000,
+    "price_usd": 635.20,
+    "revenue_ttm_usd": 164500000000,
+    "revenue_growth_yoy_pct": 18.9,
+    "gross_margin_pct": 81.8,
+    "operating_margin_pct": 41.7,
+    "pe_ratio": 26.3,
+    "52w_high_usd": 740.91,
+    "52w_low_usd": 421.45,
+    "segments": ["Family of Apps", "Reality Labs"]
+  }
+]
