@@ -15,6 +15,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from openai import OpenAI
 from html.parser import HTMLParser
+from src.agents.reviewer import ReviewInput, audit
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -350,7 +351,7 @@ def _prepare_html_summary(summary):
     return text
 
 
-def send_email(title, published, link, summary, article_type='Weekly'):
+def send_email(title, published, link, summary, article_type='Weekly', subject_prefix=''):
     to_email = os.environ.get('TO_EMAIL')
     if not to_email:
         raise RuntimeError("TO_EMAIL environment variable not set")
@@ -377,7 +378,8 @@ def send_email(title, published, link, summary, article_type='Weekly'):
 </body></html>"""
 
     msg = MIMEMultipart('alternative')
-    msg['Subject'] = f"Stratechery [{article_type}]: {title}"
+    short_title = title.split(',')[0].strip()
+    msg['Subject'] = f"{subject_prefix}[TL;DR] Stratechery: {short_title}"
     msg['From'] = 'me'
     msg['To'] = to_email
     msg.attach(MIMEText(summary, 'plain', 'utf-8'))
@@ -388,14 +390,19 @@ def send_email(title, published, link, summary, article_type='Weekly'):
     service.users().messages().send(userId='me', body={'raw': raw}).execute()
     print(f"Email sent to {to_email}")
 
+    """Return True if article was published within the last ``max_hours``.
 
-def is_fresh(published_str, max_hours=25):
+    The default of 23 hours is intentionally slightly less than a full day
+    to avoid reprocessing items across daily runs. Callers that depend on
+    a different freshness window should pass ``max_hours`` explicitly.
+    """
+def is_fresh(published_str, max_hours=23):
     """Return True if article was published within the last max_hours."""
     try:
         age = datetime.now(timezone.utc) - parsedate_to_datetime(published_str)
         return age.total_seconds() < max_hours * 3600
     except Exception:
-        return True  # unparseable date — assume fresh, don't skip
+        return False  # unparseable date — skip rather than risk duplicate
 
 
 if __name__ == "__main__":
@@ -440,6 +447,7 @@ if __name__ == "__main__":
             print(f"  {co['ticker']} segments: {co['segments']}")
 
     financial_block = ""
+    financials = []
     if companies:
         print("Fetching financials from Yahoo Finance...")
         financials = fetch_financials(companies)
@@ -449,5 +457,49 @@ if __name__ == "__main__":
     summary = summarize(title, text, financial_block, client, article_type)
     print_output(title, published, link, summary)
 
+    # --- Audit loop ---
+    print("Auditing summary...")
+    reviewer_finance = [
+        {'name': f['name'], 'ticker': f['ticker'], 'market_cap_usd': f['market_cap']}
+        for f in financials
+        if f.get('market_cap')
+    ]
+    result = audit(ReviewInput(
+        raw_article=text,
+        yfinance_data=reviewer_finance,
+        draft_summary=summary,
+        newsletter_type='stratechery',
+    ), client)
+
+    subject_prefix = ''
+    if result.action == 'FAIL':
+        print(f"  Audit FAIL — revising. Violations:\n{result.critique[:400]}")
+        revision_prompt = (
+            f"Revise this newsletter summary to fix all of the following violations "
+            f"before it is emailed. Apply every correction listed:\n\n"
+            f"{result.critique}\n\n"
+            f"---\nOriginal summary to revise:\n{summary}"
+        )
+        revision_response = _call_with_retry(lambda: client.chat.completions.create(
+            model='gpt-4o',
+            max_tokens=4000,
+            messages=[{'role': 'user', 'content': revision_prompt}]
+        ))
+        summary = revision_response.choices[0].message.content
+
+        result2 = audit(ReviewInput(
+            raw_article=text,
+            yfinance_data=reviewer_finance,
+            draft_summary=summary,
+            newsletter_type='stratechery',
+        ), client)
+        if result2.action == 'FAIL':
+            print("  Audit still FAIL after revision — flagging subject line.")
+            subject_prefix = '⚠ Audit failed: '
+        else:
+            print("  Audit PASS after revision.")
+    else:
+        print("  Audit PASS.")
+
     print("Sending email...")
-    send_email(title, published, link, summary, article_type)
+    send_email(title, published, link, summary, article_type, subject_prefix=subject_prefix)
