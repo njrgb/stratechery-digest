@@ -25,8 +25,6 @@ GMAIL_SCOPES = [
     'https://www.googleapis.com/auth/gmail.readonly',
 ]
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-
 STRATECHERY_FEED = os.environ.get('STRATECHERY_FEED', '')
 
 
@@ -401,6 +399,7 @@ def is_fresh(published_str, max_hours=23):
 
 
 if __name__ == "__main__":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
     parser = argparse.ArgumentParser(description='Summarize a Stratechery article')
     parser.add_argument('--index', type=int, default=0,
                         help='Feed entry index to summarize (0=latest, 1=second latest, etc.)')

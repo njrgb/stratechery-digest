@@ -22,8 +22,6 @@ GMAIL_SCOPES = [
     'https://www.googleapis.com/auth/gmail.readonly',
 ]
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-
 # Sender classification
 LENNY_SENDERS = {
     'lenny@substack.com': 'article',
@@ -241,7 +239,7 @@ def decode_email_body(payload):
     return html_body or plain_body or ''
 
 
-def is_fresh(date_str, max_hours=23):
+def is_fresh(date_str, max_hours=26):
     """Return True if email was received within the last max_hours."""
     try:
         age = datetime.now(timezone.utc) - parsedate_to_datetime(date_str)
@@ -396,6 +394,7 @@ def send_summary_email(subject, date_str, summary, service):
 
 
 if __name__ == '__main__':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
     api_key = os.environ.get('OPENAI_API_KEY')
     if not api_key:
         raise RuntimeError('OPENAI_API_KEY environment variable not set')

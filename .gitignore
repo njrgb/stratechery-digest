@@ -1,3 +1,6 @@
+# Claude Code local settings
+.claude/settings.local.json
+
 # OAuth credentials — never commit these
 credentials.json
 token.json
