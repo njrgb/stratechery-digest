@@ -54,9 +54,11 @@ DEFECT_CATCH_RATE:
 - If expected_action is FAIL: score 1 only if (a) reviewer outputted FAIL, AND
   (b) the critique addresses the concept of "{expected_keyword}" — it does not
   need to use the exact word, but must clearly identify that defect category.
-  Important: the keyword may appear inside a quoted passage from the draft that
-  the reviewer flags as a violation. Read the full critique carefully, including
-  any quoted text within it, before scoring this criterion.
+  Important: the keyword may appear anywhere in the critique — inside a quoted
+  passage from the draft, in the rule identification, or in the correction
+  instruction (e.g. "The raw article attributes this to Eric Seufert...").
+  Read the full critique carefully, including all quoted text and correction
+  instructions, before scoring this criterion.
 - If expected_action is PASS: score 1 only if reviewer outputted PASS.
 
 FALSE_POSITIVE_RATE:

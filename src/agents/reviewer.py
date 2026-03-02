@@ -92,8 +92,11 @@ The following phrases are banned. Flag every occurrence with the exact quoted te
   • "the author argues" / "the piece explores" / "the article discusses" / "the author discusses"
 
 CRITICAL: The last category bans ONLY anonymous, unattributed references to the author or piece.
-Named attributions using a specific person's name are NEVER a Rule 2 violation:
+Named attributions using a specific person's name are NEVER a Rule 2 violation.
+If a sentence contains a person's last name (e.g. "Thompson", "Seufert", "Altman") followed
+by a verb, it is NOT a Rule 2 violation — regardless of phrasing:
   ✓ "Thompson argues..." — NOT banned (named person)
+  ✓ "Thompson argues that this defiance stems from..." — NOT banned (named person)
   ✓ "Thompson concludes..." — NOT banned (named person)
   ✓ "Thompson contends..." — NOT banned (named person)
   ✓ "Seufert believes..." — NOT banned (named person)
@@ -161,6 +164,12 @@ If the raw article itself never names the person (only refers to them by a
 description such as "a senior AI researcher"), then the draft using that same
 description is NOT a violation. Only flag vague references when the raw article
 provides the person's full name and the draft omits it.
+
+EXCEPTION — Newsletter author:
+In Stratechery summaries, Ben Thompson is the author of every article. The correct
+first-mention format is "Ben Thompson, founder of Stratechery". After that first full
+introduction, shorthand references ("Thompson argues...", "Thompson concludes...") are
+acceptable throughout the summary and must NOT be flagged under Rule 5.
 
 Correction: Quote the vague reference and instruct the Summarizer to replace it
 with the person's full name, title, and company as given in the raw article.\
