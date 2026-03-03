@@ -15,7 +15,7 @@ Each summary goes through a **Reviewer Agent** that audits it against 5 editoria
 
 ```mermaid
 flowchart TD
-    GHA[GitHub Actions\n8am ET weekdays] --> S & L
+    GHA[GitHub Actions\n6am & noon PT daily] --> S & L
 
     subgraph S[summarize.py]
         RSS[Stratechery RSS] --> FP[feedparser]
@@ -153,9 +153,16 @@ pytest tests/test_reviewer.py -v
 
 ## Automation
 
-The GitHub Actions workflow (`.github/workflows/summarize.yml`) runs both scripts at **1pm UTC (8am ET)** on weekdays. It can also be triggered manually from the Actions tab.
+The GitHub Actions workflow (`.github/workflows/summarize.yml`) runs both scripts **twice daily, every day**:
 
-Each script skips content older than 23 hours to avoid re-sending on manual triggers.
+| Run | UTC | PT |
+|---|---|---|
+| Morning | 1pm | 6am |
+| Midday | 7pm | noon |
+
+Two runs ensure that early-morning articles (Stratechery, typically 3–5:30am PT) are caught quickly, while mid-morning articles (Lenny's, up to 10:30am PT) are caught within ~2 hours of arrival rather than the next day.
+
+Each script skips content older than **8 hours** to prevent the midday run from re-processing articles already handled by the morning run. The workflow can also be triggered manually from the Actions tab.
 
 ## Design decisions
 
@@ -180,10 +187,10 @@ Stratechery provides a private paid RSS feed, so fetching it is a simple URL cal
 Rules 1, 4, and 5 require semantic reasoning — understanding whether a company is public or private, whether an argument is correctly attributed, whether a person has been properly introduced. These can't be reliably handled with regex. Rules 2 and 3 (banned phrases and list length) are technically deterministic, but keeping all 5 rules in a single LLM call simplifies the pipeline and makes the critique more coherent. The trade-off is token cost and the small risk of the reviewer hallucinating a false positive.
 
 **Time-based deduplication instead of a database**
-The simplest way to avoid re-sending an article is to check whether it was published within the last 23 hours (slightly under 24 to eliminate overlap between consecutive daily runs). This is stateless, requires no persistence layer, and works naturally with ephemeral CI runners. A database or state file would add complexity with no real benefit at this scale.
+The simplest way to avoid re-sending an article is to check whether it was published within the last 8 hours. With two runs per day 6 hours apart, an 8-hour window ensures each article is processed by exactly one run, with a small 2-hour overlap buffer for GitHub Actions scheduling delays. This is stateless, requires no persistence layer, and works naturally with ephemeral CI runners. A database or state file would add complexity with no real benefit at this scale.
 
 **Standalone scripts instead of a shared module**
-`lenny.py` duplicates some utilities from `summarize.py` (HTML stripping, Gmail service setup, email sending) rather than importing them. This is intentional: `summarize.py` has module-level side effects (`sys.stdout` reassignment, environment variable reads at import time) that would cause problems if imported as a library. Keeping the scripts self-contained avoids a fragile import dependency.
+`lenny.py` duplicates some utilities from `summarize.py` (HTML stripping, Gmail service setup, email sending) rather than importing them. Keeping the scripts self-contained avoids a fragile import dependency and makes each script independently runnable. The `sys.stdout` encoding wrapper is scoped to `if __name__ == '__main__'` in both scripts so they can be safely imported in tests without disrupting pytest's output capture.
 
 **Two-step pipeline for Stratechery financials**
 Rather than asking GPT to recall financial figures from training data (which would be stale or hallucinated), I run a lightweight extraction pass first to identify ticker symbols, fetch live data from Yahoo Finance, and inject it into the summarization prompt. This keeps the financials grounded in real numbers.
@@ -192,7 +199,7 @@ Rather than asking GPT to recall financial figures from training data (which wou
 Lenny sends three distinct email types from three distinct substack addresses (`lenny@`, `lenny+community-wisdom@`, `lenny+how-i-ai@`). Routing on sender address is more reliable than parsing subject lines, which can vary in format.
 
 **GitHub Actions for scheduling**
-Free, requires no server or cloud infrastructure, and integrates naturally with the existing repo. The main trade-off is that scheduled runs can be delayed by a few minutes under load — the 23-hour freshness window accounts for this.
+Free, requires no server or cloud infrastructure, and integrates naturally with the existing repo. The main trade-off is that scheduled runs can be delayed by a few minutes under load — the 8-hour freshness window (vs. 6-hour run gap) provides a 2-hour buffer to account for this.
 
 ## File structure
 
@@ -208,6 +215,7 @@ src/
     reviewer.py       # Reviewer Agent — audits drafts against 5 rules
 tests/
   test_reviewer.py    # LLM-as-a-Judge eval suite (6 test cases)
+  test_freshness.py   # Unit tests for is_fresh() freshness logic
   conftest.py         # Pytest fixtures
   fixtures/
     eval_dataset.json # Eval scenarios (TC-01 through TC-06)
