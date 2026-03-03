@@ -2,7 +2,8 @@ name: Daily Newsletter Summaries
 
 on:
   schedule:
-    - cron: '0 13 * * *'    # 1pm UTC = ~8am ET, every day
+    - cron: '0 13 * * *'    # 1pm UTC = 6am PT  — catches early-morning articles
+    - cron: '0 19 * * *'    # 7pm UTC = noon PT — catches mid-morning articles
   workflow_dispatch:          # also allows manual trigger from GitHub UI
 
 jobs:

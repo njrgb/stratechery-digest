@@ -239,7 +239,7 @@ def decode_email_body(payload):
     return html_body or plain_body or ''
 
 
-def is_fresh(date_str, max_hours=26):
+def is_fresh(date_str, max_hours=8):
     """Return True if email was received within the last max_hours."""
     try:
         age = datetime.now(timezone.utc) - parsedate_to_datetime(date_str)

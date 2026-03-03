@@ -389,7 +389,7 @@ def send_email(title, published, link, summary, article_type='Weekly', subject_p
     print(f"Email sent to {to_email}")
 
 
-def is_fresh(published_str, max_hours=23):
+def is_fresh(published_str, max_hours=8):
     """Return True if article was published within the last max_hours."""
     try:
         age = datetime.now(timezone.utc) - parsedate_to_datetime(published_str)
