@@ -59,6 +59,18 @@ DEFECT_CATCH_RATE:
   instruction (e.g. "The raw article attributes this to Eric Seufert...").
   Read the full critique carefully, including all quoted text and correction
   instructions, before scoring this criterion.
+
+  Keyword-to-concept mapping (use this to decide if the concept is addressed):
+  • "GUEST"   → satisfied by any of: "GUEST CONTEXT", "Rule 5", vague person
+                 reference, missing full name / title / company
+  • "BANNED"  → satisfied by: "Rule 2", banned phrase identified (delve, ever-evolving,
+                 the author argues, the article discusses, the piece explores)
+  • "LIST"    → satisfied by: "Rule 3", list too long, too many bullet points
+  • "private" → satisfied by: "Rule 1", private company financial, unattributed figure
+                 for a private company (OpenAI, Stripe, Anthropic, etc.)
+  • "Seufert" → satisfied by: misattribution involving Eric Seufert, "Rule 4"
+  • ""        → for PASS cases only; ignore this field and check only the verdict.
+
 - If expected_action is PASS: score 1 only if reviewer outputted PASS.
 
 FALSE_POSITIVE_RATE:
@@ -97,7 +109,7 @@ def _judge(
         critique_text=critique_text,
     )
     response = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-4o",
         temperature=0,
         response_format={"type": "json_object"},
         messages=[{"role": "user", "content": prompt}],
@@ -117,13 +129,13 @@ def _judge(
 def test_reviewer_eval(
     test_case: dict,
     mock_article: str,
-    mock_finance: list[dict],
+    mock_financial_block: str,
     openai_client: OpenAI,
 ) -> None:
     # --- Step 1: Run the Reviewer Agent ---
     review_input = ReviewInput(
         raw_article=mock_article,
-        yfinance_data=mock_finance,
+        financial_block=mock_financial_block,
         draft_summary=test_case["draft_summary"],
         newsletter_type="stratechery",
     )

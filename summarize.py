@@ -349,12 +349,88 @@ def _prepare_html_summary(summary):
     return text
 
 
-def send_email(title, published, link, summary, article_type='Weekly', subject_prefix=''):
+
+def _extract_currency_figures(text):
+    """Extract deduplicated currency figures from text, returning list of (raw_string, value, scale)."""
+    from src.agents.reviewer import _CURRENCY_RE, _normalize_figure
+    seen = set()
+    results = []
+    for match in _CURRENCY_RE.finditer(text):
+        raw = match.group()
+        normalized = _normalize_figure(raw)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        results.append((raw, normalized[0], normalized[1]))
+    return results
+
+
+def _find_figure_context(value, scale, raw_article, financial_block):
+    """
+    Find a source sentence for a currency figure (value, scale) in the article or financial block.
+    Returns (source_type, excerpt) where source_type is 'article', 'finance', or None.
+    """
+    from src.agents.reviewer import _build_search_pattern
+    pattern = _build_search_pattern(value, scale)
+
+    for source_type, text in [('article', raw_article), ('finance', financial_block)]:
+        if not text:
+            continue
+        match = pattern.search(text)
+        if match:
+            # Extract the surrounding sentence
+            start = max(0, match.start() - 120)
+            end = min(len(text), match.end() + 120)
+            excerpt = text[start:end]
+            # Trim to sentence boundaries if possible
+            left = excerpt.rfind('.', 0, match.start() - start)
+            if left >= 0:
+                excerpt = excerpt[left + 1:]
+            right = excerpt.find('.', match.end() - start - (match.start() - start - left - 1 if left >= 0 else 0))
+            if right >= 0:
+                excerpt = excerpt[:right + 1]
+            excerpt = excerpt.strip()
+            if len(excerpt) > 160:
+                excerpt = excerpt[:157] + '...'
+            return (source_type, excerpt)
+    return (None, None)
+
+
+def _build_verify_facts_html(summary, raw_article, financial_block):
+    """Build an HTML 'Verify Facts' section listing all currency figures with their source context."""
+    figures = _extract_currency_figures(summary)
+    if not figures:
+        return ''
+
+    rows = []
+    for raw, value, scale in figures:
+        source_type, excerpt = _find_figure_context(value, scale, raw_article, financial_block)
+        if source_type == 'article':
+            source_html = f'<span class="vf-article">&ldquo;{excerpt}&rdquo;</span>'
+        elif source_type == 'finance':
+            source_html = '<em class="vf-finance">from Yahoo Finance</em>'
+        else:
+            source_html = '<strong class="vf-missing">Not found in source</strong>'
+        rows.append(f'<tr><td class="vf-figure">{raw}</td><td>{source_html}</td></tr>')
+
+    rows_html = '\n'.join(rows)
+    return f"""<div class="verify-facts">
+<p class="verify-header">VERIFY FACTS</p>
+<p class="verify-desc">Currency figures cited in this summary and their sources.</p>
+<table>
+<tr><th>Figure</th><th>Source</th></tr>
+{rows_html}
+</table>
+</div>"""
+
+
+def send_email(title, published, link, summary, article_type='Weekly', subject_prefix='', raw_article='', financial_block=''):
     to_email = os.environ.get('TO_EMAIL')
     if not to_email:
         raise RuntimeError("TO_EMAIL environment variable not set")
 
     html_body = md.markdown(_prepare_html_summary(summary), extensions=['tables'])
+    verify_facts_html = _build_verify_facts_html(summary, raw_article, financial_block)
     html = f"""<!DOCTYPE html>
 <html><head><style>
   body {{ font-family: Georgia, serif; max-width: 700px; margin: 40px auto; color: #222; line-height: 1.7; }}
@@ -367,11 +443,19 @@ def send_email(title, published, link, summary, article_type='Weekly', subject_p
   th {{ background: #f5f5f5; font-weight: bold; }}
   .meta {{ color: #888; font-size: 0.88em; margin-bottom: 1.5em; }}
   .footer {{ margin-top: 2em; font-size: 0.85em; color: #888; border-top: 1px solid #eee; padding-top: 1em; }}
+  .verify-facts {{ margin-top: 2em; font-size: 0.85em; color: #555; }}
+  .verify-header {{ font-weight: bold; letter-spacing: 0.06em; border-bottom: 2px solid #333; padding-bottom: 4px; color: #111; display: block; margin-bottom: 0.5em; }}
+  .verify-desc {{ color: #888; margin: 0 0 0.8em 0; }}
+  .vf-figure {{ white-space: nowrap; font-family: monospace; font-size: 0.95em; padding-right: 1em; }}
+  .vf-missing {{ color: #c00; }}
+  .vf-finance {{ color: #666; }}
+  .vf-article {{ color: #444; }}
 </style></head>
 <body>
 <p class="meta">Stratechery &nbsp;·&nbsp; {published[:16]} &nbsp;·&nbsp; {article_type}</p>
 <h1>{title}</h1>
 {html_body}
+{verify_facts_html}
 <p class="footer"><a href="{link}">Read original →</a></p>
 </body></html>"""
 
@@ -405,6 +489,8 @@ if __name__ == "__main__":
                         help='Feed entry index to summarize (0=latest, 1=second latest, etc.)')
     parser.add_argument('--list', action='store_true',
                         help='List available articles in the feed and exit')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='Run summarize+audit loop but skip sending the email')
     args = parser.parse_args()
 
     api_key = os.environ.get('OPENAI_API_KEY')
@@ -453,14 +539,9 @@ if __name__ == "__main__":
 
     # --- Audit loop ---
     print("Auditing summary...")
-    reviewer_finance = [
-        {'name': f['name'], 'ticker': f['ticker'], 'market_cap_usd': f['market_cap']}
-        for f in financials
-        if f.get('market_cap')
-    ]
     result = audit(ReviewInput(
         raw_article=text,
-        yfinance_data=reviewer_finance,
+        financial_block=financial_block,
         draft_summary=summary,
         newsletter_type='stratechery',
     ), client)
@@ -468,32 +549,73 @@ if __name__ == "__main__":
     subject_prefix = ''
     if result.action == 'FAIL':
         print(f"  Audit FAIL — revising. Violations:\n{result.critique[:400]}")
-        revision_prompt = (
-            f"Revise this newsletter summary to fix all of the following violations "
-            f"before it is emailed. Apply every correction listed:\n\n"
-            f"{result.critique}\n\n"
-            f"---\nOriginal summary to revise:\n{summary}"
+        revision_system = SUMMARIZE_PROMPT.format(
+            title=title,
+            text=text,
+            financial_block=financial_block,
+            article_type=article_type,
+        )
+        revision_user = (
+            f"The draft summary below failed an editorial audit. Revise it to fix every "
+            f"violation listed — keep all other content unchanged.\n\n"
+            f"VIOLATIONS TO FIX:\n{result.critique}\n\n"
+            f"RULE 1 VALID FIXES (private company financials):\n"
+            f"  • Remove the unattributed figure entirely, OR\n"
+            f"  • Add a named attribution: e.g. 'per Bloomberg', 'according to [Name, Title]'\n"
+            f"  Do NOT rephrase the figure or add vague hedges like 'reportedly' — those still fail.\n\n"
+            f"RULE 3 VALID FIXES (list length):\n"
+            f"  • Remove the least informative items until the list has 3 or fewer entries.\n"
+            f"  Do NOT split one long list into two shorter lists — that still fails.\n\n"
+            f"RULE 4 VALID FIXES (POV attribution):\n"
+            f"  - Find the exact claim in the RAW ARTICLE. Check who the article attributes it to.\n"
+            f"  - If the raw article names a DIFFERENT person: replace the credited person\n"
+            f"    in the draft with whoever the raw article actually names.\n"
+            f"  - If the raw article does NOT name anyone for the claim: attribute to Thompson\n"
+            f"    ('Thompson argues...') or remove the third-party attribution entirely.\n"
+            f"  Do NOT use hedges like reportedly - attribute clearly to a named person.\n"
+            f"  - After fixing the listed violations, scan the ENTIRE revised draft for ALL\n"
+            f"    attributed claims (any sentence crediting a named person with an argument or\n"
+            f"    position) and verify each one against the raw article. Fix any additional\n"
+            f"    misattributions you find — do not stop at the violations listed above.\n\n"
+            f"RULE 5 VALID FIXES (guest context):\n"
+            f"  • Find the person's full name, title, and company in the RAW ARTICLE (provided in\n"
+            f"    your system prompt) and use them on first mention.\n"
+            f"  • Any ordering is acceptable: 'Name, Title at Company' or 'Company's Title, Name'.\n"
+            f"  • CRITICAL: Adding a first name alone is NOT sufficient. You must include all three:\n"
+            f"    full name + title + company. E.g. expanding 'Booty' to 'Matt Booty' still fails —\n"
+            f"    the correct fix is 'Matt Booty, Head of Xbox Game Studios at Microsoft'.\n"
+            f"  • Scan the ENTIRE revised draft for any person mentioned by last name only or without\n"
+            f"    title/company, and apply the full introduction to each one.\n"
+            f"  • If the raw article itself only uses a description (e.g. 'a senior researcher') and\n"
+            f"    never gives a name, using that same description is NOT a violation — leave it as-is.\n\n"
+            f"---\nDRAFT TO REVISE:\n{summary}"
         )
         revision_response = _call_with_retry(lambda: client.chat.completions.create(
             model='gpt-4o',
             max_tokens=4000,
-            messages=[{'role': 'user', 'content': revision_prompt}]
+            messages=[
+                {'role': 'system', 'content': revision_system},
+                {'role': 'user', 'content': revision_user},
+            ],
         ))
         summary = revision_response.choices[0].message.content
 
         result2 = audit(ReviewInput(
             raw_article=text,
-            yfinance_data=reviewer_finance,
+            financial_block=financial_block,
             draft_summary=summary,
             newsletter_type='stratechery',
         ), client)
         if result2.action == 'FAIL':
-            print("  Audit still FAIL after revision — flagging subject line.")
+            print(f"  Audit still FAIL after revision. Remaining violations:\n{result2.critique}")
             subject_prefix = '⚠ Audit failed: '
         else:
             print("  Audit PASS after revision.")
     else:
         print("  Audit PASS.")
 
-    print("Sending email...")
-    send_email(title, published, link, summary, article_type, subject_prefix=subject_prefix)
+    if args.dry_run:
+        print("Dry run — skipping email send.")
+    else:
+        print("Sending email...")
+        send_email(title, published, link, summary, article_type, subject_prefix=subject_prefix, raw_article=text, financial_block=financial_block)

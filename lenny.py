@@ -433,7 +433,7 @@ if __name__ == '__main__':
             print(f"    Auditing...")
             result = audit(ReviewInput(
                 raw_article=email['text'],
-                yfinance_data=[],
+                financial_block='',
                 draft_summary=summary,
                 newsletter_type='lenny',
             ), client)
@@ -455,7 +455,7 @@ if __name__ == '__main__':
 
                 result2 = audit(ReviewInput(
                     raw_article=email['text'],
-                    yfinance_data=[],
+                    financial_block='',
                     draft_summary=summary,
                     newsletter_type='lenny',
                 ), client)
