@@ -365,10 +365,50 @@ def _extract_currency_figures(text):
     return results
 
 
+def _get_finance_label(match_pos, match_line, financial_block):
+    """
+    Given a match position in financial_block and the line containing the match,
+    return a human-readable label like 'Apple (AAPL) — Market cap'.
+    """
+    import re as _re
+    # Find the most recent company header before match_pos
+    company_header_re = _re.compile(r'^(.+) \(([A-Z]+)\)', _re.MULTILINE)
+    company_name = ''
+    ticker = ''
+    for m in company_header_re.finditer(financial_block):
+        if m.start() > match_pos:
+            break
+        company_name = m.group(1).strip()
+        ticker = m.group(2)
+
+    if not company_name:
+        return ''
+
+    # Determine metric from the matched line
+    line = match_line.strip()
+    if 'Market cap:' in line:
+        metric = 'Market cap'
+    elif _re.match(r'\d{4}-\d{2}:', line):
+        period = line[:7]
+        # Figure out if this specific match is closer to Revenue or Net income
+        rev_idx = line.find('Revenue')
+        net_idx = line.find('Net income')
+        # Use a simple heuristic: find the $ sign position within the line
+        dollar_idx = line.find('$')
+        if net_idx >= 0 and dollar_idx > net_idx:
+            metric = f'Net income {period}'
+        else:
+            metric = f'Revenue {period}'
+    else:
+        return ''
+
+    return f'{company_name} ({ticker}) \u2014 {metric}'
+
+
 def _find_figure_context(value, scale, raw_article, financial_block):
     """
     Find a source sentence for a currency figure (value, scale) in the article or financial block.
-    Returns (source_type, excerpt) where source_type is 'article', 'finance', or None.
+    Returns (source_type, excerpt, label) where source_type is 'article', 'finance', or None.
     """
     from src.agents.reviewer import _build_search_pattern
     pattern = _build_search_pattern(value, scale)
@@ -392,33 +432,49 @@ def _find_figure_context(value, scale, raw_article, financial_block):
             excerpt = excerpt.strip()
             if len(excerpt) > 160:
                 excerpt = excerpt[:157] + '...'
-            return (source_type, excerpt)
-    return (None, None)
+
+            label = ''
+            if source_type == 'finance':
+                # Find the line containing the match for metric detection
+                line_start = text.rfind('\n', 0, match.start())
+                line_end = text.find('\n', match.end())
+                matched_line = text[line_start:line_end if line_end >= 0 else len(text)]
+                label = _get_finance_label(match.start(), matched_line, text)
+
+            return (source_type, excerpt, label)
+    return (None, None, '')
 
 
 def _build_verify_facts_html(summary, raw_article, financial_block):
     """Build an HTML 'Verify Facts' section listing all currency figures with their source context."""
+    import urllib.parse
     figures = _extract_currency_figures(summary)
     if not figures:
         return ''
 
     rows = []
     for raw, value, scale in figures:
-        source_type, excerpt = _find_figure_context(value, scale, raw_article, financial_block)
+        source_type, excerpt, label = _find_figure_context(value, scale, raw_article, financial_block)
+        query = label if label else raw
+        search_url = f'https://www.google.com/search?q={urllib.parse.quote(query)}'
+        figure_html = f'<a class="vf-figure" href="{search_url}" target="_blank">{raw}</a>'
+
+        desc_html = label if label else ''
+
         if source_type == 'article':
             source_html = f'<span class="vf-article">&ldquo;{excerpt}&rdquo;</span>'
         elif source_type == 'finance':
             source_html = '<em class="vf-finance">from Yahoo Finance</em>'
         else:
             source_html = '<strong class="vf-missing">Not found in source</strong>'
-        rows.append(f'<tr><td class="vf-figure">{raw}</td><td>{source_html}</td></tr>')
+        rows.append(f'<tr><td>{figure_html}</td><td class="vf-desc">{desc_html}</td><td>{source_html}</td></tr>')
 
     rows_html = '\n'.join(rows)
     return f"""<div class="verify-facts">
 <p class="verify-header">VERIFY FACTS</p>
 <p class="verify-desc">Currency figures cited in this summary and their sources.</p>
 <table>
-<tr><th>Figure</th><th>Source</th></tr>
+<tr><th>Figure</th><th>Description</th><th>Source</th></tr>
 {rows_html}
 </table>
 </div>"""
@@ -446,7 +502,9 @@ def send_email(title, published, link, summary, article_type='Weekly', subject_p
   .verify-facts {{ margin-top: 2em; font-size: 0.85em; color: #555; }}
   .verify-header {{ font-weight: bold; letter-spacing: 0.06em; border-bottom: 2px solid #333; padding-bottom: 4px; color: #111; display: block; margin-bottom: 0.5em; }}
   .verify-desc {{ color: #888; margin: 0 0 0.8em 0; }}
-  .vf-figure {{ white-space: nowrap; font-family: monospace; font-size: 0.95em; padding-right: 1em; }}
+  .vf-figure {{ white-space: nowrap; font-family: monospace; font-size: 0.95em; color: #1a0dab; text-decoration: none; }}
+  .vf-figure:hover {{ text-decoration: underline; }}
+  .vf-desc {{ color: #555; font-size: 0.9em; }}
   .vf-missing {{ color: #c00; }}
   .vf-finance {{ color: #666; }}
   .vf-article {{ color: #444; }}
