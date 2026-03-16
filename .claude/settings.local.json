@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(pip show:*)"
+      "Bash(pip show:*)",
+      "Bash(python -m pytest:*)"
     ]
   }
 }
